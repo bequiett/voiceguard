@@ -50,14 +50,14 @@ impl EventGuard {
             return EventDecision::default();
         }
 
-        let mut total = 0.0;
-        let mut low = 0.0;
-        let mut voice = 0.0;
-        let mut high = 0.0;
-        let mut flux = 0.0;
-        let mut peak = 0.0;
-        let mut mag_sum = 0.0;
-        let mut log_sum = 0.0;
+        let mut total = 0.0_f32;
+        let mut low = 0.0_f32;
+        let mut voice = 0.0_f32;
+        let mut high = 0.0_f32;
+        let mut flux = 0.0_f32;
+        let mut peak = 0.0_f32;
+        let mut mag_sum = 0.0_f32;
+        let mut log_sum = 0.0_f32;
 
         for (i, c) in self.spectrum.iter().enumerate() {
             let mag = c.norm() + 1e-10;
@@ -93,12 +93,10 @@ impl EventGuard {
             * ramp(crest, 3.0, 11.0)
             * ramp(burst, 1.7, 8.0))
             .clamp(0.0, 1.0);
-
         let wind_raw = (ramp(low_ratio, 0.34, 0.78)
             * ramp(flatness, 0.12, 0.48)
             * (1.0 - ramp(voice_ratio, 0.45, 0.82)))
             .clamp(0.0, 1.0);
-
         let breath_raw = (ramp(flatness, 0.24, 0.64)
             * ramp(high_ratio, 0.05, 0.28)
             * (1.0 - ramp(voice_ratio, 0.52, 0.86)))
@@ -107,11 +105,7 @@ impl EventGuard {
         self.wind_state = smooth_state(self.wind_state, wind_raw, 0.55, 0.94);
         self.breath_state = smooth_state(self.breath_state, breath_raw, 0.48, 0.92);
 
-        EventDecision {
-            transient,
-            wind: self.wind_state,
-            breath: self.breath_state,
-        }
+        EventDecision { transient, wind: self.wind_state, breath: self.breath_state }
     }
 }
 
@@ -122,4 +116,29 @@ fn smooth_state(old: f32, new: f32, attack: f32, release: f32) -> f32 {
 
 fn ramp(x: f32, lo: f32, hi: f32) -> f32 {
     ((x - lo) / (hi - lo)).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn impulse_is_transient() {
+        let mut guard = EventGuard::new();
+        for _ in 0..8 { let _ = guard.analyze(&vec![0.0001; 480]); }
+        let mut frame = vec![0.0; 480];
+        frame[100] = 1.0;
+        let d = guard.analyze(&frame);
+        assert!(d.transient > 0.35, "{}", d.transient);
+    }
+
+    #[test]
+    fn tone_is_not_a_breath() {
+        let mut guard = EventGuard::new();
+        let frame: Vec<f32> = (0..480)
+            .map(|i| (2.0 * PI * 180.0 * i as f32 / 48_000.0).sin() * 0.2)
+            .collect();
+        let d = guard.analyze(&frame);
+        assert!(d.breath < 0.30, "{}", d.breath);
+    }
 }
