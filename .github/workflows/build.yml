@@ -25,8 +25,8 @@ jobs:
       - name: runtime
         shell: pwsh
         run: |
-          $bundle = 'target/bundled/VoiceGuard.vst3/Contents/x86_64-win'
-          $dll = Get-ChildItem -Path target -Recurse -Filter onnxruntime.dll | Select-Object -First 1
+          $bundle = 'target/bundled/voiceguard.vst3/Contents/x86_64-win'
+          $dll = Get-ChildItem -Path target,$env:CARGO_HOME -Recurse -Filter onnxruntime.dll -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($dll) {
             Copy-Item $dll.FullName $bundle -Force
           } else {
@@ -38,11 +38,11 @@ jobs:
         run: |
           Invoke-WebRequest 'https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip' -OutFile pluginval.zip
           Expand-Archive pluginval.zip pluginval
-          .\pluginval\pluginval.exe --strictness-level 5 --validate-in-process --validate "target/bundled/VoiceGuard.vst3"
+          .\pluginval\pluginval.exe --strictness-level 5 --validate-in-process --validate "target/bundled/voiceguard.vst3"
 
       - name: upload
         uses: actions/upload-artifact@v4
         with:
           name: VoiceGuard
-          path: target/bundled/VoiceGuard.vst3
+          path: target/bundled/voiceguard.vst3
           if-no-files-found: error
