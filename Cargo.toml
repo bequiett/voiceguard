@@ -4,24 +4,23 @@ resolver = "2"
 
 [package]
 name = "voiceguard"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["bequiett"]
 license = "AGPL-3.0-only"
-description = "Low-latency speech-first microphone cleanup VST3"
+description = "Real-time microphone cleanup VST3"
 
 [lib]
 crate-type = ["cdylib"]
 
-[features]
-default = ["ort-download"]
-ort-download = ["ort/download-binaries", "ort-sys/tls-rustls"]
-
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "f36931f7af4646065488a9845d8f8c2f95252c23" }
-ort = { version = "2.0.0-rc.11", default-features = false }
-ort-sys = { version = "2.0.0-rc.11", default-features = false }
-realfft = "3.4"
+deepfilter-rt = { git = "https://github.com/shimondoodkin/deepfilter-rt", rev = "f1a1b27be767a5e62ccc8625017f1737c33a3bf9" }
+crossbeam-channel = "0.5"
+realfft = "3.5"
+
+[patch."https://github.com/Rikorose/DeepFilterNet"]
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "d375b2d8309e0935d165700c91da9de862a99c31" }
 
 [profile.release]
 opt-level = 3
