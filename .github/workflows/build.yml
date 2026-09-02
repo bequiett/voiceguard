@@ -3,7 +3,7 @@ name: Build VST3
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, v0.2]
 
 jobs:
   build:
