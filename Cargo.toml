@@ -16,6 +16,7 @@ crate-type = ["cdylib"]
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "f36931f7af4646065488a9845d8f8c2f95252c23" }
 deepfilter-rt = { git = "https://github.com/shimondoodkin/deepfilter-rt", rev = "f1a1b27be767a5e62ccc8625017f1737c33a3bf9" }
+ort = { version = "=2.0.0-rc.11", default-features = false }
 crossbeam-channel = "0.5"
 realfft = "3.5"
 
