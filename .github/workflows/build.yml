@@ -25,13 +25,9 @@ jobs:
       - name: runtime
         shell: pwsh
         run: |
-          $bundle = 'target/bundled/voiceguard.vst3/Contents/x86_64-win'
-          $dll = Get-ChildItem -Path target,$env:CARGO_HOME -Recurse -Filter onnxruntime.dll -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($dll) {
-            Copy-Item $dll.FullName $bundle -Force
-          } else {
-            Write-Error 'onnxruntime.dll not found'
-          }
+          Invoke-WebRequest 'https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-win-x64-1.28.0.zip' -OutFile onnxruntime.zip
+          Expand-Archive onnxruntime.zip onnxruntime
+          Copy-Item 'onnxruntime/onnxruntime-win-x64-1.28.0/lib/onnxruntime.dll' 'target/bundled/voiceguard.vst3/Contents/x86_64-win/' -Force
 
       - name: validate
         shell: pwsh
