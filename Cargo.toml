@@ -1,0 +1,30 @@
+[workspace]
+members = ["xtask"]
+resolver = "2"
+
+[package]
+name = "voiceguard"
+version = "0.1.0"
+edition = "2021"
+authors = ["bequiett"]
+license = "AGPL-3.0-only"
+description = "Low-latency speech-first microphone cleanup VST3"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = ["ort-download"]
+ort-download = ["ort/download-binaries", "ort-sys/tls-rustls"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "f36931f7af4646065488a9845d8f8c2f95252c23" }
+ort = { version = "2.0.0-rc.11", default-features = false }
+ort-sys = { version = "2.0.0-rc.11", default-features = false }
+realfft = "3.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
