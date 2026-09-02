@@ -179,6 +179,9 @@ impl ChannelEngine {
         if decision.confidence > 0.65 && speech_prob < 0.45 {
             nr_strength = (nr_strength + decision.confidence * settings.artifact * 0.40).clamp(0.0, 1.0);
         }
+        if settings.artifact >= 0.80 && decision.burst > 0.55 && speech_prob < 0.85 {
+            nr_strength = (nr_strength + decision.burst * settings.artifact * 0.30).clamp(0.0, 1.0);
+        }
 
         let inv_scale = 1.0 / self.scale;
         for i in 0..NUM_BINS {
@@ -214,10 +217,11 @@ impl ChannelEngine {
             self.overlap[i] += self.ifft_out[i] * scale * self.window[i];
         }
 
-        let attack_coeff = coeff_ms(2.0, self.sample_rate);
-        let release_coeff = coeff_ms(28.0, self.sample_rate);
+        let open_coeff = coeff_ms(2.0, self.sample_rate);
+        let fast_transient = settings.artifact >= 0.80 && decision.burst > 0.55 && speech_prob < 0.88;
+        let close_coeff = coeff_ms(if fast_transient { 0.8 } else { 28.0 }, self.sample_rate);
         for i in 0..self.hop {
-            let coeff = if gate_target > self.gate_gain { attack_coeff } else { release_coeff };
+            let coeff = if gate_target > self.gate_gain { open_coeff } else { close_coeff };
             self.gate_gain = gate_target + coeff * (self.gate_gain - gate_target);
             let y = (self.overlap[i] * self.gate_gain).clamp(-0.98, 0.98);
             self.output.push_back(y);
@@ -242,6 +246,17 @@ impl ChannelEngine {
         let speech_now = speech >= threshold;
         let strong_onset = decision.burst > 0.28;
         let hard_artifact = decision.confidence * s.artifact > (0.76 + 0.12 * s.voice_protect);
+
+        let transient_score = decision.confidence.max(decision.burst * (1.0 - 0.55 * speech));
+        let transient_cut = s.artifact >= 0.80
+            && transient_score * s.artifact > (0.48 + 0.16 * s.voice_protect)
+            && speech < (0.72 + 0.18 * s.voice_protect);
+
+        if transient_cut {
+            self.hangover = 0;
+            self.provisional = 0;
+            return s.floor_gain;
+        }
 
         if speech_now {
             self.hangover = 9;
