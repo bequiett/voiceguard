@@ -3,7 +3,7 @@ name: Build VST3
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, v0.2]
 
 jobs:
   build:
@@ -18,16 +18,28 @@ jobs:
       - name: rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: check
+        shell: pwsh
+        run: cargo check --release
+
+      - name: tests
+        shell: pwsh
+        run: cargo test --release
+
       - name: build
         shell: pwsh
         run: cargo xtask bundle voiceguard --release
 
+      - name: model files
+        shell: pwsh
+        run: Copy-Item 'assets/dfn3_h0' 'target/bundled/voiceguard.vst3/Contents/x86_64-win/dfn3_h0' -Recurse -Force
+
       - name: runtime
         shell: pwsh
         run: |
-          Invoke-WebRequest 'https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-win-x64-1.28.0.zip' -OutFile onnxruntime.zip
+          Invoke-WebRequest 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip' -OutFile onnxruntime.zip
           Expand-Archive onnxruntime.zip onnxruntime
-          Copy-Item 'onnxruntime/onnxruntime-win-x64-1.28.0/lib/onnxruntime.dll' 'target/bundled/voiceguard.vst3/Contents/x86_64-win/' -Force
+          Copy-Item 'onnxruntime/onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll' 'target/bundled/voiceguard.vst3/Contents/x86_64-win/' -Force
 
       - name: validate
         shell: pwsh
@@ -39,6 +51,6 @@ jobs:
       - name: upload
         uses: actions/upload-artifact@v4
         with:
-          name: VoiceGuard
+          name: VoiceGuard-v0.2
           path: target/bundled/voiceguard.vst3
           if-no-files-found: error
