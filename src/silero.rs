@@ -26,7 +26,7 @@ impl SpeechVad {
             .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Level3).ok())
             .and_then(|b| b.with_intra_threads(1).ok())
             .and_then(|b| b.with_inter_threads(1).ok())
-            .and_then(|b| b.commit_from_memory(MODEL).ok());
+            .and_then(|mut b| b.commit_from_memory(MODEL).ok());
 
         Self {
             session,
@@ -50,11 +50,6 @@ impl SpeechVad {
         self.probability = 0.0;
     }
 
-    #[inline]
-    pub fn probability(&self) -> f32 {
-        self.probability
-    }
-
     pub fn push(&mut self, sample: f32) -> f32 {
         let ratio = 16_000.0 / self.sample_rate.max(16_000.0);
         self.phase += ratio;
@@ -74,46 +69,32 @@ impl SpeechVad {
     }
 
     fn run_frame(&mut self) {
-        let Some(session) = self.session.as_mut() else {
-            self.fallback_probability();
-            return;
-        };
-
         let mut input = [0.0_f32; VAD_FRAME + CONTEXT];
         input[..CONTEXT].copy_from_slice(&self.context);
         input[CONTEXT..].copy_from_slice(&self.frame);
         let sr = [16_000_i64; 1];
 
-        let Ok(input_tensor) = TensorRef::from_array_view(([1_usize, VAD_FRAME + CONTEXT], &input[..])) else {
-            self.fallback_probability();
-            return;
-        };
-        let Ok(state_tensor) = TensorRef::from_array_view(([2_usize, 1, 128], &self.state[..])) else {
-            self.fallback_probability();
-            return;
-        };
-        let Ok(sr_tensor) = TensorRef::from_array_view(([1_usize], &sr[..])) else {
-            self.fallback_probability();
-            return;
-        };
+        let result = (|| {
+            let session = self.session.as_mut()?;
+            let input_tensor = TensorRef::from_array_view(([1_usize, VAD_FRAME + CONTEXT], &input[..])).ok()?;
+            let state_tensor = TensorRef::from_array_view(([2_usize, 1, 128], &self.state[..])).ok()?;
+            let sr_tensor = TensorRef::from_array_view(([1_usize], &sr[..])).ok()?;
 
-        let Ok(outputs) = session.run(ort::inputs![input_tensor, state_tensor, sr_tensor]) else {
-            self.fallback_probability();
-            return;
-        };
-        let Ok((_, out)) = outputs[0].try_extract_tensor::<f32>() else {
-            self.fallback_probability();
-            return;
-        };
-        let Ok((_, state_out)) = outputs[1].try_extract_tensor::<f32>() else {
-            self.fallback_probability();
-            return;
-        };
-        if let Some(&p) = out.first() {
+            let outputs = session.run(ort::inputs![input_tensor, state_tensor, sr_tensor]).ok()?;
+            let (_, out) = outputs[0].try_extract_tensor::<f32>().ok()?;
+            let (_, state_out) = outputs[1].try_extract_tensor::<f32>().ok()?;
+            let p = out.first().copied()?;
+            if state_out.len() != STATE_SIZE {
+                return None;
+            }
+            Some((p, state_out.to_vec()))
+        })();
+
+        if let Some((p, state_out)) = result {
             self.probability = (self.probability * 0.30 + p.clamp(0.0, 1.0) * 0.70).clamp(0.0, 1.0);
-        }
-        if state_out.len() == STATE_SIZE {
-            self.state.copy_from_slice(state_out);
+            self.state.copy_from_slice(&state_out);
+        } else {
+            self.fallback_probability();
         }
     }
 
