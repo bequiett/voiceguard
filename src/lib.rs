@@ -17,13 +17,19 @@ struct VoiceGuard {
     sample_rate: f32,
 }
 
+struct PendingFrame {
+    raw: Vec<f32>,
+    enhanced: Option<Vec<f32>>,
+    event: EventDecision,
+}
+
 struct Channel {
     worker: DfWorker,
     event: EventGuard,
     input: Vec<f32>,
     input_pos: usize,
     output: VecDeque<f32>,
-    delayed: VecDeque<(Vec<f32>, EventDecision)>,
+    delayed: VecDeque<PendingFrame>,
     event_gain: f32,
 }
 
@@ -45,7 +51,7 @@ impl Default for VoiceGuardParams {
     fn default() -> Self {
         Self {
             bypass: BoolParam::new("Bypass", false),
-            strength: FloatParam::new("Strength", 0.90, FloatRange::Linear { min: 0.0, max: 1.0 })
+            strength: FloatParam::new("Strength", 0.94, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
@@ -77,27 +83,32 @@ impl Channel {
         }
     }
 
-    fn push(&mut self, sample: f32, artifact: f32, floor: f32, protect: f32) -> f32 {
+    fn push(&mut self, sample: f32, strength: f32, artifact: f32, floor: f32, protect: f32) -> f32 {
         self.input[self.input_pos] = sample;
         self.input_pos += 1;
         if self.input_pos == FRAME {
-            let frame = self.input.clone();
-            let decision = self.event.analyze(&frame);
-            self.worker.submit(frame);
-            self.delayed.push_back((Vec::new(), decision));
+            let raw = self.input.clone();
+            let decision = self.event.analyze(&raw);
+            self.worker.submit(raw.clone());
+            self.delayed.push_back(PendingFrame { raw, enhanced: None, event: decision });
             self.input_pos = 0;
         }
 
-        while let Some(mut enhanced) = self.worker.take() {
-            let decision = self.delayed.front().map(|x| x.1).unwrap_or_default();
-            if let Some(front) = self.delayed.front_mut() {
-                front.0 = std::mem::take(&mut enhanced);
-                front.1 = decision;
+        while let Some(enhanced) = self.worker.take() {
+            if let Some(slot) = self.delayed.iter_mut().find(|x| x.enhanced.is_none()) {
+                slot.enhanced = Some(enhanced);
             }
-            if self.delayed.len() > EXTRA_LOOKAHEAD {
-                if let Some((frame, d)) = self.delayed.pop_front() {
-                    self.render(frame, d, artifact, floor, protect);
-                }
+        }
+
+        while self.delayed.len() > EXTRA_LOOKAHEAD {
+            let ready = self.delayed.front().map(|x| x.enhanced.is_some()).unwrap_or(false);
+            if !ready { break; }
+            if let Some(mut pending) = self.delayed.pop_front() {
+                let enhanced = pending.enhanced.take().unwrap_or_else(|| pending.raw.clone());
+                let mixed: Vec<f32> = enhanced.iter().zip(pending.raw.iter())
+                    .map(|(wet, dry)| wet * strength + dry * (1.0 - strength))
+                    .collect();
+                self.render(mixed, pending.event, artifact, floor, protect);
             }
         }
 
@@ -106,14 +117,14 @@ impl Channel {
 
     fn render(&mut self, frame: Vec<f32>, d: EventDecision, artifact: f32, floor: f32, protect: f32) {
         if frame.len() != FRAME {
-            self.output.extend(std::iter::repeat(0.0).take(FRAME));
+            self.output.extend(std::iter::repeat_n(0.0, FRAME));
             return;
         }
 
         let transient = d.transient * artifact;
         let breath = d.breath * artifact;
         let wind = d.wind * artifact;
-        let mut target = 1.0;
+        let mut target: f32 = 1.0;
 
         if transient > 0.42 {
             target = target.min(1.0 - transient * (0.92 - 0.25 * protect));
@@ -177,16 +188,15 @@ impl Plugin for VoiceGuard {
 
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, _context: &mut impl ProcessContext<Self>) -> ProcessStatus {
         if self.params.bypass.value() { return ProcessStatus::Normal; }
+        let strength = self.params.strength.value();
         let artifact = self.params.artifact.value();
         let floor = util::db_to_gain(self.params.floor.value());
         let protect = self.params.voice_protect.value();
-        let strength = self.params.strength.value();
 
         for mut frame in buffer.iter_samples() {
             for (i, sample) in frame.iter_mut().enumerate() {
                 if let Some(channel) = self.channels.get_mut(i) {
-                    let wet = channel.push(*sample, artifact, floor, protect);
-                    *sample = wet * strength + *sample * (1.0 - strength);
+                    *sample = channel.push(*sample, strength, artifact, floor, protect);
                 }
             }
         }
