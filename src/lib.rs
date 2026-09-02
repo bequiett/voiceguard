@@ -1,79 +1,144 @@
-mod artifact;
-mod biquad;
-mod engine;
-mod gtcrn;
-mod silero;
+mod df_worker;
+mod event_guard;
 
-use std::{num::NonZeroU32, sync::Arc};
+use std::{collections::VecDeque, num::NonZeroU32, path::PathBuf, sync::Arc};
 
-use engine::{ChannelEngine, Settings};
+use df_worker::DfWorker;
+use event_guard::{EventDecision, EventGuard};
 use nih_plug::prelude::*;
-use silero::SpeechVad;
+
+const FRAME: usize = 480;
+const EXTRA_LOOKAHEAD: usize = 2;
+const REPORTED_LATENCY: u32 = 2880;
 
 struct VoiceGuard {
     params: Arc<VoiceGuardParams>,
-    engines: Vec<ChannelEngine>,
-    vad: SpeechVad,
+    channels: Vec<Channel>,
     sample_rate: f32,
+}
+
+struct Channel {
+    worker: DfWorker,
+    event: EventGuard,
+    input: Vec<f32>,
+    input_pos: usize,
+    output: VecDeque<f32>,
+    delayed: VecDeque<(Vec<f32>, EventDecision)>,
+    event_gain: f32,
 }
 
 #[derive(Params)]
 struct VoiceGuardParams {
     #[id = "bypass"]
     bypass: BoolParam,
-
     #[id = "strength"]
     strength: FloatParam,
-
     #[id = "voice_protect"]
     voice_protect: FloatParam,
-
     #[id = "artifact"]
     artifact: FloatParam,
-
     #[id = "floor"]
     floor: FloatParam,
-
-    #[id = "air"]
-    air: FloatParam,
 }
 
 impl Default for VoiceGuardParams {
     fn default() -> Self {
         Self {
             bypass: BoolParam::new("Bypass", false),
-            strength: FloatParam::new("Strength", 0.72, FloatRange::Linear { min: 0.0, max: 1.0 })
+            strength: FloatParam::new("Strength", 0.90, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
-            voice_protect: FloatParam::new("Voice Protect", 0.82, FloatRange::Linear { min: 0.0, max: 1.0 })
+            voice_protect: FloatParam::new("Voice Protect", 0.72, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
-            artifact: FloatParam::new("Artifact", 0.70, FloatRange::Linear { min: 0.0, max: 1.0 })
+            artifact: FloatParam::new("Artifact", 0.90, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
-            floor: FloatParam::new("Floor", -32.0, FloatRange::Linear { min: -60.0, max: -12.0 })
+            floor: FloatParam::new("Floor", -45.0, FloatRange::Linear { min: -72.0, max: -12.0 })
                 .with_unit(" dB")
                 .with_value_to_string(formatters::v2s_f32_rounded(1)),
-            air: FloatParam::new("Air", 0.75, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_unit(" %")
-                .with_value_to_string(formatters::v2s_f32_percentage(0))
-                .with_string_to_value(formatters::s2v_f32_percentage()),
+        }
+    }
+}
+
+impl Channel {
+    fn new(model_dir: PathBuf) -> Self {
+        Self {
+            worker: DfWorker::new(model_dir),
+            event: EventGuard::new(),
+            input: vec![0.0; FRAME],
+            input_pos: 0,
+            output: VecDeque::with_capacity(FRAME * 8),
+            delayed: VecDeque::with_capacity(8),
+            event_gain: 1.0,
+        }
+    }
+
+    fn push(&mut self, sample: f32, artifact: f32, floor: f32, protect: f32) -> f32 {
+        self.input[self.input_pos] = sample;
+        self.input_pos += 1;
+        if self.input_pos == FRAME {
+            let frame = self.input.clone();
+            let decision = self.event.analyze(&frame);
+            self.worker.submit(frame);
+            self.delayed.push_back((Vec::new(), decision));
+            self.input_pos = 0;
+        }
+
+        while let Some(mut enhanced) = self.worker.take() {
+            let decision = self.delayed.front().map(|x| x.1).unwrap_or_default();
+            if let Some(front) = self.delayed.front_mut() {
+                front.0 = std::mem::take(&mut enhanced);
+                front.1 = decision;
+            }
+            if self.delayed.len() > EXTRA_LOOKAHEAD {
+                if let Some((frame, d)) = self.delayed.pop_front() {
+                    self.render(frame, d, artifact, floor, protect);
+                }
+            }
+        }
+
+        self.output.pop_front().unwrap_or(0.0)
+    }
+
+    fn render(&mut self, frame: Vec<f32>, d: EventDecision, artifact: f32, floor: f32, protect: f32) {
+        if frame.len() != FRAME {
+            self.output.extend(std::iter::repeat(0.0).take(FRAME));
+            return;
+        }
+
+        let transient = d.transient * artifact;
+        let breath = d.breath * artifact;
+        let wind = d.wind * artifact;
+        let mut target = 1.0;
+
+        if transient > 0.42 {
+            target = target.min(1.0 - transient * (0.92 - 0.25 * protect));
+        }
+        if breath > 0.28 {
+            target = target.min(1.0 - breath * (0.88 - 0.30 * protect));
+        }
+        if wind > 0.30 {
+            target = target.min(1.0 - wind * (0.94 - 0.24 * protect));
+        }
+        target = target.clamp(floor, 1.0);
+
+        let attack = if transient > 0.42 { 0.12 } else { 0.55 };
+        let release = if breath.max(wind) > 0.30 { 0.992 } else { 0.975 };
+        for x in frame {
+            let coeff = if target < self.event_gain { attack } else { release };
+            self.event_gain = target + coeff * (self.event_gain - target);
+            self.output.push_back((x * self.event_gain).clamp(-0.99, 0.99));
         }
     }
 }
 
 impl Default for VoiceGuard {
     fn default() -> Self {
-        let sample_rate = 48_000.0;
-        Self {
-            params: Arc::new(VoiceGuardParams::default()),
-            engines: vec![ChannelEngine::new(sample_rate), ChannelEngine::new(sample_rate)],
-            vad: SpeechVad::new(sample_rate),
-            sample_rate,
-        }
+        Self { params: Arc::new(VoiceGuardParams::default()), channels: Vec::new(), sample_rate: 48_000.0 }
     }
 }
 
@@ -85,106 +150,68 @@ impl Plugin for VoiceGuard {
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
-        AudioIOLayout {
-            main_input_channels: NonZeroU32::new(1),
-            main_output_channels: NonZeroU32::new(1),
-            ..AudioIOLayout::const_default()
-        },
-        AudioIOLayout {
-            main_input_channels: NonZeroU32::new(2),
-            main_output_channels: NonZeroU32::new(2),
-            ..AudioIOLayout::const_default()
-        },
+        AudioIOLayout { main_input_channels: NonZeroU32::new(1), main_output_channels: NonZeroU32::new(1), ..AudioIOLayout::const_default() },
+        AudioIOLayout { main_input_channels: NonZeroU32::new(2), main_output_channels: NonZeroU32::new(2), ..AudioIOLayout::const_default() },
     ];
-
     const MIDI_INPUT: MidiConfig = MidiConfig::None;
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
     type SysExMessage = ();
     type BackgroundTask = ();
 
-    fn params(&self) -> Arc<dyn Params> {
-        self.params.clone()
-    }
+    fn params(&self) -> Arc<dyn Params> { self.params.clone() }
 
-    fn initialize(
-        &mut self,
-        audio_io_layout: &AudioIOLayout,
-        buffer_config: &BufferConfig,
-        context: &mut impl InitContext<Self>,
-    ) -> bool {
-        self.sample_rate = buffer_config.sample_rate;
-        let channels = audio_io_layout.main_input_channels.map_or(1, |n| n.get()) as usize;
-        self.engines = (0..channels).map(|_| ChannelEngine::new(self.sample_rate)).collect();
-        self.vad = SpeechVad::new(self.sample_rate);
-        if let Some(engine) = self.engines.first() {
-            context.set_latency_samples(engine.reported_latency_samples());
-        }
+    fn initialize(&mut self, layout: &AudioIOLayout, config: &BufferConfig, context: &mut impl InitContext<Self>) -> bool {
+        if (config.sample_rate - 48_000.0).abs() > 1.0 { return false; }
+        self.sample_rate = config.sample_rate;
+        let count = layout.main_input_channels.map_or(1, |n| n.get()) as usize;
+        let model_dir = model_dir();
+        self.channels = (0..count).map(|_| Channel::new(model_dir.clone())).collect();
+        context.set_latency_samples(REPORTED_LATENCY);
         true
     }
 
     fn reset(&mut self) {
-        for engine in &mut self.engines {
-            engine.reset();
-        }
-        self.vad.reset(self.sample_rate);
+        let model_dir = model_dir();
+        for channel in &mut self.channels { *channel = Channel::new(model_dir.clone()); }
     }
 
-    fn process(
-        &mut self,
-        buffer: &mut Buffer,
-        _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
-    ) -> ProcessStatus {
-        if self.params.bypass.value() {
-            return ProcessStatus::Normal;
-        }
-
-        let settings = Settings {
-            strength: self.params.strength.value().clamp(0.0, 1.0),
-            voice_protect: self.params.voice_protect.value().clamp(0.0, 1.0),
-            artifact: self.params.artifact.value().clamp(0.0, 1.0),
-            floor_gain: util::db_to_gain(self.params.floor.value()),
-            air: self.params.air.value().clamp(0.0, 1.0),
-        };
+    fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, _context: &mut impl ProcessContext<Self>) -> ProcessStatus {
+        if self.params.bypass.value() { return ProcessStatus::Normal; }
+        let artifact = self.params.artifact.value();
+        let floor = util::db_to_gain(self.params.floor.value());
+        let protect = self.params.voice_protect.value();
+        let strength = self.params.strength.value();
 
         for mut frame in buffer.iter_samples() {
-            let channels = frame.len().max(1);
-            let mut mono = 0.0_f32;
-            for sample in frame.iter_mut() {
-                mono += *sample;
-            }
-            mono /= channels as f32;
-            let speech = self.vad.push(mono);
-            for (channel, sample) in frame.iter_mut().enumerate() {
-                if let Some(engine) = self.engines.get_mut(channel) {
-                    *sample = engine.process_sample(*sample, speech, settings);
+            for (i, sample) in frame.iter_mut().enumerate() {
+                if let Some(channel) = self.channels.get_mut(i) {
+                    let wet = channel.push(*sample, artifact, floor, protect);
+                    *sample = wet * strength + *sample * (1.0 - strength);
                 }
             }
         }
-
         ProcessStatus::Normal
     }
 }
 
+fn model_dir() -> PathBuf {
+    std::env::current_exe().ok()
+        .and_then(|p| p.parent().map(|x| x.to_path_buf()))
+        .unwrap_or_default()
+        .join("dfn3_h0")
+}
+
 impl ClapPlugin for VoiceGuard {
     const CLAP_ID: &'static str = "com.bequiett.voiceguard";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("Low-latency speech-first microphone cleanup");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("Real-time microphone cleanup");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] = &[
-        ClapFeature::AudioEffect,
-        ClapFeature::Mono,
-        ClapFeature::Stereo,
-        ClapFeature::Utility,
-    ];
+    const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Mono, ClapFeature::Stereo, ClapFeature::Utility];
 }
 
 impl Vst3Plugin for VoiceGuard {
-    const VST3_CLASS_ID: [u8; 16] = *b"VoiceGuardBqt001";
-    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
-        Vst3SubCategory::Fx,
-        Vst3SubCategory::Tools,
-    ];
+    const VST3_CLASS_ID: [u8; 16] = *b"VoiceGuardBqt002";
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Fx, Vst3SubCategory::Tools];
 }
 
 nih_export_clap!(VoiceGuard);
