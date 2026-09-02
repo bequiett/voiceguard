@@ -19,9 +19,6 @@ deepfilter-rt = { git = "https://github.com/shimondoodkin/deepfilter-rt", rev = 
 crossbeam-channel = "0.5"
 realfft = "3.5"
 
-[patch."https://github.com/Rikorose/DeepFilterNet"]
-deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "d375b2d8309e0935d165700c91da9de862a99c31" }
-
 [profile.release]
 opt-level = 3
 lto = "thin"
