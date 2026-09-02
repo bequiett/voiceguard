@@ -34,14 +34,11 @@ impl EventGuard {
         }
     }
 
-    pub fn reset(&mut self) {
-        self.prev_mag.fill(0.0);
-        self.noise_energy = 1e-7;
-        self.breath_state = 0.0;
-        self.wind_state = 0.0;
-    }
-
     pub fn analyze(&mut self, frame: &[f32]) -> EventDecision {
+        let time_peak = frame.iter().take(480).fold(0.0_f32, |m, x| m.max(x.abs()));
+        let time_rms = (frame.iter().take(480).map(|x| x * x).sum::<f32>() / 480.0).sqrt();
+        let time_crest = time_peak / (time_rms + 1e-9);
+
         for (i, x) in frame.iter().take(480).enumerate() {
             let w = 0.5 - 0.5 * (2.0 * PI * i as f32 / 479.0).cos();
             self.input[i] = *x * w;
@@ -55,7 +52,6 @@ impl EventGuard {
         let mut voice = 0.0_f32;
         let mut high = 0.0_f32;
         let mut flux = 0.0_f32;
-        let mut peak = 0.0_f32;
         let mut mag_sum = 0.0_f32;
         let mut log_sum = 0.0_f32;
 
@@ -65,7 +61,6 @@ impl EventGuard {
             total += p;
             mag_sum += mag;
             log_sum += mag.ln();
-            peak = peak.max(mag);
             flux += (mag - self.prev_mag[i]).max(0.0);
             self.prev_mag[i] = mag;
             let hz = i as f32 * 100.0;
@@ -80,7 +75,6 @@ impl EventGuard {
         let voice_ratio = voice / (total + 1e-10);
         let high_ratio = high / (total + 1e-10);
         let flux_n = flux / (mag_sum + 1e-9);
-        let crest = peak / (mag_sum / self.spectrum.len() as f32 + 1e-9);
         let burst = total / (self.noise_energy + 1e-10);
 
         if burst < 2.0 {
@@ -89,9 +83,9 @@ impl EventGuard {
             self.noise_energy = self.noise_energy * 0.997 + total * 0.003;
         }
 
-        let transient = (ramp(flux_n, 0.08, 0.34)
-            * ramp(crest, 3.0, 11.0)
-            * ramp(burst, 1.7, 8.0))
+        let transient = (ramp(flux_n, 0.06, 0.30)
+            * ramp(time_crest, 2.8, 10.0)
+            * ramp(burst, 1.6, 7.0))
             .clamp(0.0, 1.0);
         let wind_raw = (ramp(low_ratio, 0.34, 0.78)
             * ramp(flatness, 0.12, 0.48)
@@ -129,7 +123,7 @@ mod tests {
         let mut frame = vec![0.0; 480];
         frame[100] = 1.0;
         let d = guard.analyze(&frame);
-        assert!(d.transient > 0.35, "{}", d.transient);
+        assert!(d.transient > 0.70, "{}", d.transient);
     }
 
     #[test]
