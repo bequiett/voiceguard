@@ -3,54 +3,45 @@ name: Build VST3
 on:
   workflow_dispatch:
   push:
-    branches: [main, v0.2]
+    branches: [main, v0.3]
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: models
         shell: pwsh
         run: ./scripts/fetch-models.ps1
-
       - name: rust
         uses: dtolnay/rust-toolchain@stable
-
       - name: check
         shell: pwsh
         run: cargo check --release
-
       - name: tests
         shell: pwsh
         run: cargo test --release
-
       - name: build
         shell: pwsh
         run: cargo xtask bundle voiceguard --release
-
       - name: model files
         shell: pwsh
-        run: Copy-Item 'assets/dfn3_h0' 'target/bundled/voiceguard.vst3/Contents/x86_64-win/dfn3_h0' -Recurse -Force
-
+        run: Copy-Item 'assets/dpdfnet8' 'target/bundled/voiceguard.vst3/Contents/x86_64-win/dpdfnet8' -Recurse -Force
       - name: runtime
         shell: pwsh
         run: |
           Invoke-WebRequest 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip' -OutFile onnxruntime.zip
           Expand-Archive onnxruntime.zip onnxruntime
           Copy-Item 'onnxruntime/onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll' 'target/bundled/voiceguard.vst3/Contents/x86_64-win/' -Force
-
       - name: validate
         shell: pwsh
         run: |
           Invoke-WebRequest 'https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip' -OutFile pluginval.zip
           Expand-Archive pluginval.zip pluginval
           .\pluginval\pluginval.exe --strictness-level 5 --validate-in-process --validate "target/bundled/voiceguard.vst3"
-
       - name: upload
         uses: actions/upload-artifact@v4
         with:
-          name: VoiceGuard-v0.2
+          name: VoiceGuard-v0.3
           path: target/bundled/voiceguard.vst3
           if-no-files-found: error
