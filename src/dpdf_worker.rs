@@ -1,6 +1,6 @@
 use std::{f32::consts::PI, path::PathBuf, thread};
 
-use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
+use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
 use ort::{
     session::{builder::GraphOptimizationLevel, Session},
     value::TensorRef,
