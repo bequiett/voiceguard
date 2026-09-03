@@ -11,6 +11,10 @@ const FRAME: usize = 480;
 const EXTRA_LOOKAHEAD: usize = 2;
 const REPORTED_LATENCY: u32 = 2880;
 
+#[cfg(windows)]
+#[used]
+static DLL_ANCHOR: u16 = 0;
+
 struct VoiceGuard {
     params: Arc<VoiceGuardParams>,
     channels: Vec<Channel>,
@@ -89,8 +93,12 @@ impl Channel {
         if self.input_pos == FRAME {
             let raw = self.input.clone();
             let decision = self.event.analyze(&raw);
-            self.worker.submit(raw.clone());
-            self.delayed.push_back(PendingFrame { raw, enhanced: None, event: decision });
+            let submitted = self.worker.submit(raw.clone());
+            self.delayed.push_back(PendingFrame {
+                enhanced: if submitted { None } else { Some(raw.clone()) },
+                raw,
+                event: decision,
+            });
             self.input_pos = 0;
         }
 
@@ -175,14 +183,18 @@ impl Plugin for VoiceGuard {
         if (config.sample_rate - 48_000.0).abs() > 1.0 { return false; }
         self.sample_rate = config.sample_rate;
         let count = layout.main_input_channels.map_or(1, |n| n.get()) as usize;
-        let model_dir = model_dir();
+        let base = plugin_dir();
+        preload_runtime(&base);
+        let model_dir = base.join("dfn3_h0");
         self.channels = (0..count).map(|_| Channel::new(model_dir.clone())).collect();
         context.set_latency_samples(REPORTED_LATENCY);
         true
     }
 
     fn reset(&mut self) {
-        let model_dir = model_dir();
+        let base = plugin_dir();
+        preload_runtime(&base);
+        let model_dir = base.join("dfn3_h0");
         for channel in &mut self.channels { *channel = Channel::new(model_dir.clone()); }
     }
 
@@ -204,12 +216,48 @@ impl Plugin for VoiceGuard {
     }
 }
 
-fn model_dir() -> PathBuf {
-    std::env::current_exe().ok()
-        .and_then(|p| p.parent().map(|x| x.to_path_buf()))
-        .unwrap_or_default()
-        .join("dfn3_h0")
+#[cfg(windows)]
+fn plugin_dir() -> PathBuf {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt, ptr};
+    use windows_sys::Win32::System::LibraryLoader::{
+        GetModuleFileNameW, GetModuleHandleExW,
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    };
+
+    let mut module = ptr::null_mut();
+    let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    let address = &raw const DLL_ANCHOR;
+    let ok = unsafe { GetModuleHandleExW(flags, address, &mut module) };
+    if ok != 0 {
+        let mut buf = vec![0_u16; 32768];
+        let len = unsafe { GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32) };
+        if len > 0 {
+            let path = PathBuf::from(OsString::from_wide(&buf[..len as usize]));
+            if let Some(parent) = path.parent() {
+                return parent.to_path_buf();
+            }
+        }
+    }
+    std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)).unwrap_or_default()
 }
+
+#[cfg(not(windows))]
+fn plugin_dir() -> PathBuf {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)).unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn preload_runtime(base: &std::path::Path) {
+    use std::{os::windows::ffi::OsStrExt, iter};
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+
+    let dll = base.join("onnxruntime.dll");
+    let wide: Vec<u16> = dll.as_os_str().encode_wide().chain(iter::once(0)).collect();
+    unsafe { LoadLibraryW(wide.as_ptr()); }
+}
+
+#[cfg(not(windows))]
+fn preload_runtime(_base: &std::path::Path) {}
 
 impl ClapPlugin for VoiceGuard {
     const CLAP_ID: &'static str = "com.bequiett.voiceguard";
