@@ -1,4 +1,5 @@
 mod dpdf_worker;
+mod editor;
 mod event_guard;
 
 use std::{collections::VecDeque, num::NonZeroU32, path::PathBuf, sync::Arc};
@@ -6,6 +7,7 @@ use std::{collections::VecDeque, num::NonZeroU32, path::PathBuf, sync::Arc};
 use dpdf_worker::{DpdfWorker, HOP};
 use event_guard::{EventDecision, EventGuard};
 use nih_plug::prelude::*;
+use nih_plug_egui::EguiState;
 
 const LOOKAHEAD: usize = 4;
 const REPORTED_LATENCY: u32 = 2880;
@@ -17,6 +19,7 @@ static DLL_ANCHOR: u16 = 0;
 struct VoiceGuard {
     params: Arc<VoiceGuardParams>,
     channels: Vec<Channel>,
+    mono_source: bool,
 }
 
 struct PendingFrame {
@@ -37,26 +40,37 @@ struct Channel {
 }
 
 #[derive(Params)]
-struct VoiceGuardParams {
-    #[id = "bypass"] bypass: BoolParam,
-    #[id = "strength"] strength: FloatParam,
-    #[id = "voice_protect"] voice_protect: FloatParam,
-    #[id = "artifact"] artifact: FloatParam,
-    #[id = "floor"] floor: FloatParam,
+pub(crate) struct VoiceGuardParams {
+    #[persist = "editor-state"]
+    pub(crate) editor_state: Arc<EguiState>,
+    #[id = "bypass"] pub(crate) bypass: BoolParam,
+    #[id = "strength"] pub(crate) strength: FloatParam,
+    #[id = "voice_protect"] pub(crate) voice_protect: FloatParam,
+    #[id = "artifact"] pub(crate) artifact: FloatParam,
+    #[id = "floor"] pub(crate) floor: FloatParam,
+    #[id = "output_gain"] pub(crate) output_gain: FloatParam,
 }
 
 impl Default for VoiceGuardParams {
     fn default() -> Self {
         Self {
+            editor_state: EguiState::from_size(600, 330),
             bypass: BoolParam::new("Bypass", false),
-            strength: FloatParam::new("Strength", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+            strength: FloatParam::new("Strength", 0.96, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %").with_value_to_string(formatters::v2s_f32_percentage(0)).with_string_to_value(formatters::s2v_f32_percentage()),
-            voice_protect: FloatParam::new("Voice Protect", 0.80, FloatRange::Linear { min: 0.0, max: 1.0 })
+            voice_protect: FloatParam::new("Voice Protect", 0.84, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %").with_value_to_string(formatters::v2s_f32_percentage(0)).with_string_to_value(formatters::s2v_f32_percentage()),
-            artifact: FloatParam::new("Artifact", 0.82, FloatRange::Linear { min: 0.0, max: 1.0 })
+            artifact: FloatParam::new("Artifact", 0.72, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %").with_value_to_string(formatters::v2s_f32_percentage(0)).with_string_to_value(formatters::s2v_f32_percentage()),
-            floor: FloatParam::new("Floor", -48.0, FloatRange::Linear { min: -72.0, max: -12.0 })
+            floor: FloatParam::new("Floor", -42.0, FloatRange::Linear { min: -72.0, max: -12.0 })
                 .with_unit(" dB").with_value_to_string(formatters::v2s_f32_rounded(1)),
+            output_gain: FloatParam::new("Output", util::db_to_gain(0.0), FloatRange::Skewed {
+                    min: util::db_to_gain(-12.0), max: util::db_to_gain(18.0), factor: FloatRange::gain_skew_factor(-12.0, 18.0),
+                })
+                .with_smoother(SmoothingStyle::Logarithmic(30.0))
+                .with_unit(" dB")
+                .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
+                .with_string_to_value(formatters::s2v_f32_gain_to_db()),
         }
     }
 }
@@ -87,6 +101,8 @@ impl Channel {
             if !self.delayed.front().map(|x| x.enhanced.is_some()).unwrap_or(false) { break; }
             let mut pending = self.delayed.pop_front().unwrap();
             let enhanced = pending.enhanced.take().unwrap_or_else(|| pending.raw.clone());
+            // Keep a small, time-aligned dry component. This reduces the hard neural texture without
+            // changing the model or reintroducing enough raw signal to defeat the cleanup.
             let mixed = enhanced.iter().zip(&pending.raw).map(|(wet, dry)| wet * strength + dry * (1.0 - strength)).collect();
             self.render(mixed, pending.event, artifact, floor, protect);
         }
@@ -99,17 +115,18 @@ impl Channel {
         let breath = d.breath * artifact;
         let wind = d.wind * artifact;
         let event = transient.max(breath).max(wind);
-        if event > 0.48 { self.event_hold = if transient > breath.max(wind) { 2 } else { 10 }; }
+        if event > 0.52 { self.event_hold = if transient > breath.max(wind) { 2 } else { 8 }; }
         let active = self.event_hold > 0;
         if self.event_hold > 0 { self.event_hold -= 1; }
 
         let mut target = 1.0_f32;
         if active {
-            let depth = if transient > 0.48 { 0.82 } else { 0.72 };
-            target = (1.0 - event * depth * (1.0 - 0.35 * protect)).clamp(floor, 1.0);
+            let depth = if transient > 0.52 { 0.72 } else { 0.62 };
+            target = (1.0 - event * depth * (1.0 - 0.42 * protect)).clamp(floor, 1.0);
         }
-        let attack = if transient > 0.48 { 0.05 } else { 0.25 };
-        let release = if breath.max(wind) > 0.40 { 0.996 } else { 0.985 };
+        // Slower gain motion than 0.3.0 avoids audible frame-edge roughness/chatter.
+        let attack = if transient > 0.52 { 0.16 } else { 0.48 };
+        let release = if breath.max(wind) > 0.42 { 0.998 } else { 0.994 };
         for x in frame {
             let coeff = if target < self.event_gain { attack } else { release };
             self.event_gain = target + coeff * (self.event_gain - target);
@@ -118,7 +135,9 @@ impl Channel {
     }
 }
 
-impl Default for VoiceGuard { fn default() -> Self { Self { params: Arc::new(VoiceGuardParams::default()), channels: Vec::new() } } }
+impl Default for VoiceGuard {
+    fn default() -> Self { Self { params: Arc::new(VoiceGuardParams::default()), channels: Vec::new(), mono_source: false } }
+}
 
 impl Plugin for VoiceGuard {
     const NAME: &'static str = "VoiceGuard";
@@ -127,32 +146,56 @@ impl Plugin for VoiceGuard {
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
-        AudioIOLayout { main_input_channels: NonZeroU32::new(1), main_output_channels: NonZeroU32::new(1), ..AudioIOLayout::const_default() },
+        AudioIOLayout { main_input_channels: NonZeroU32::new(1), main_output_channels: NonZeroU32::new(2), ..AudioIOLayout::const_default() },
         AudioIOLayout { main_input_channels: NonZeroU32::new(2), main_output_channels: NonZeroU32::new(2), ..AudioIOLayout::const_default() },
+        AudioIOLayout { main_input_channels: NonZeroU32::new(1), main_output_channels: NonZeroU32::new(1), ..AudioIOLayout::const_default() },
     ];
     const MIDI_INPUT: MidiConfig = MidiConfig::None;
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
     type SysExMessage = ();
     type BackgroundTask = ();
+
     fn params(&self) -> Arc<dyn Params> { self.params.clone() }
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> { editor::create(self.params.clone()) }
+
     fn initialize(&mut self, layout: &AudioIOLayout, config: &BufferConfig, context: &mut impl InitContext<Self>) -> bool {
         if (config.sample_rate - 48_000.0).abs() > 1.0 { return false; }
-        let count = layout.main_input_channels.map_or(1, |n| n.get()) as usize;
+        let in_count = layout.main_input_channels.map_or(1, |n| n.get()) as usize;
+        let out_count = layout.main_output_channels.map_or(in_count as u32, |n| n.get()) as usize;
+        self.mono_source = in_count == 1 && out_count == 2;
         let base = plugin_dir(); preload_runtime(&base);
         let model = base.join("dpdfnet8").join("dpdfnet8_48khz_hr.onnx");
-        self.channels = (0..count).map(|_| Channel::new(model.clone())).collect();
+        let processors = if self.mono_source { 1 } else { in_count };
+        self.channels = (0..processors).map(|_| Channel::new(model.clone())).collect();
         context.set_latency_samples(REPORTED_LATENCY); true
     }
+
     fn reset(&mut self) {
         let base = plugin_dir(); preload_runtime(&base);
         let model = base.join("dpdfnet8").join("dpdfnet8_48khz_hr.onnx");
         for channel in &mut self.channels { *channel = Channel::new(model.clone()); }
     }
+
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, _context: &mut impl ProcessContext<Self>) -> ProcessStatus {
         if self.params.bypass.value() { return ProcessStatus::Normal; }
-        let strength = self.params.strength.value(); let artifact = self.params.artifact.value();
-        let floor = util::db_to_gain(self.params.floor.value()); let protect = self.params.voice_protect.value();
-        for mut frame in buffer.iter_samples() { for (i, sample) in frame.iter_mut().enumerate() { if let Some(ch) = self.channels.get_mut(i) { *sample = ch.push(*sample, strength, artifact, floor, protect); } } }
+        let strength = self.params.strength.value();
+        let artifact = self.params.artifact.value();
+        let floor = util::db_to_gain(self.params.floor.value());
+        let protect = self.params.voice_protect.value();
+
+        for mut frame in buffer.iter_samples() {
+            let gain = self.params.output_gain.smoothed.next();
+            if self.mono_source && frame.len() >= 2 {
+                let y = self.channels.get_mut(0).map(|ch| ch.push(*frame[0], strength, artifact, floor, protect)).unwrap_or(*frame[0]);
+                let y = (y * gain).clamp(-0.99, 0.99);
+                *frame[0] = y;
+                *frame[1] = y;
+            } else {
+                for (i, sample) in frame.iter_mut().enumerate() {
+                    if let Some(ch) = self.channels.get_mut(i) { *sample = (ch.push(*sample, strength, artifact, floor, protect) * gain).clamp(-0.99, 0.99); }
+                }
+            }
+        }
         ProcessStatus::Normal
     }
 }
