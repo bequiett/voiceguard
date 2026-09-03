@@ -101,8 +101,6 @@ impl Channel {
             if !self.delayed.front().map(|x| x.enhanced.is_some()).unwrap_or(false) { break; }
             let mut pending = self.delayed.pop_front().unwrap();
             let enhanced = pending.enhanced.take().unwrap_or_else(|| pending.raw.clone());
-            // Keep a small, time-aligned dry component. This reduces the hard neural texture without
-            // changing the model or reintroducing enough raw signal to defeat the cleanup.
             let mixed = enhanced.iter().zip(&pending.raw).map(|(wet, dry)| wet * strength + dry * (1.0 - strength)).collect();
             self.render(mixed, pending.event, artifact, floor, protect);
         }
@@ -124,7 +122,6 @@ impl Channel {
             let depth = if transient > 0.52 { 0.72 } else { 0.62 };
             target = (1.0 - event * depth * (1.0 - 0.42 * protect)).clamp(floor, 1.0);
         }
-        // Slower gain motion than 0.3.0 avoids audible frame-edge roughness/chatter.
         let attack = if transient > 0.52 { 0.16 } else { 0.48 };
         let release = if breath.max(wind) > 0.42 { 0.998 } else { 0.994 };
         for x in frame {
@@ -185,11 +182,15 @@ impl Plugin for VoiceGuard {
 
         for mut frame in buffer.iter_samples() {
             let gain = self.params.output_gain.smoothed.next();
-            if self.mono_source && frame.len() >= 2 {
-                let y = self.channels.get_mut(0).map(|ch| ch.push(*frame[0], strength, artifact, floor, protect)).unwrap_or(*frame[0]);
-                let y = (y * gain).clamp(-0.99, 0.99);
-                *frame[0] = y;
-                *frame[1] = y;
+            if self.mono_source {
+                let mut samples = frame.iter_mut();
+                if let Some(left) = samples.next() {
+                    let input = *left;
+                    let y = self.channels.get_mut(0).map(|ch| ch.push(input, strength, artifact, floor, protect)).unwrap_or(input);
+                    let y = (y * gain).clamp(-0.99, 0.99);
+                    *left = y;
+                    if let Some(right) = samples.next() { *right = y; }
+                }
             } else {
                 for (i, sample) in frame.iter_mut().enumerate() {
                     if let Some(ch) = self.channels.get_mut(i) { *sample = (ch.push(*sample, strength, artifact, floor, protect) * gain).clamp(-0.99, 0.99); }
