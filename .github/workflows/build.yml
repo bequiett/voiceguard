@@ -42,6 +42,6 @@ jobs:
       - name: upload
         uses: actions/upload-artifact@v4
         with:
-          name: VoiceGuard-v0.3
+          name: VoiceGuard-v0.3.1
           path: target/bundled/voiceguard.vst3
           if-no-files-found: error
