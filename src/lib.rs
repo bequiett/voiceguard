@@ -54,9 +54,9 @@ pub(crate) struct VoiceGuardParams {
 impl Default for VoiceGuardParams {
     fn default() -> Self {
         Self {
-            editor_state: EguiState::from_size(600, 330),
+            editor_state: EguiState::from_size(560, 300),
             bypass: BoolParam::new("Bypass", false),
-            strength: FloatParam::new("Strength", 0.96, FloatRange::Linear { min: 0.0, max: 1.0 })
+            strength: FloatParam::new("Strength", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %").with_value_to_string(formatters::v2s_f32_percentage(0)).with_string_to_value(formatters::s2v_f32_percentage()),
             voice_protect: FloatParam::new("Voice Protect", 0.84, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %").with_value_to_string(formatters::v2s_f32_percentage(0)).with_string_to_value(formatters::s2v_f32_percentage()),
