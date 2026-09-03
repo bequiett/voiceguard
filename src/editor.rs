@@ -4,7 +4,7 @@ use nih_plug::prelude::*;
 use nih_plug_egui::{
     create_egui_editor,
     egui::{self, Color32, FontId, RichText, Stroke, Vec2},
-    widgets, EguiState,
+    widgets,
 };
 
 use crate::VoiceGuardParams;
@@ -16,19 +16,12 @@ pub fn create(params: Arc<VoiceGuardParams>) -> Option<Box<dyn Editor>> {
         (),
         |ctx, _| {
             let mut visuals = egui::Visuals::dark();
-            visuals.window_rounding = 0.0.into();
-            visuals.menu_rounding = 0.0.into();
-            visuals.widgets.noninteractive.rounding = 0.0.into();
-            visuals.widgets.inactive.rounding = 0.0.into();
-            visuals.widgets.hovered.rounding = 0.0.into();
-            visuals.widgets.active.rounding = 0.0.into();
-            visuals.widgets.open.rounding = 0.0.into();
             visuals.panel_fill = Color32::from_rgb(18, 20, 23);
             visuals.extreme_bg_color = Color32::from_rgb(11, 13, 15);
             visuals.widgets.inactive.bg_fill = Color32::from_rgb(31, 34, 39);
             visuals.widgets.hovered.bg_fill = Color32::from_rgb(42, 46, 52);
             visuals.widgets.active.bg_fill = Color32::from_rgb(54, 60, 68);
-            visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(58, 63, 70));
+            visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(58, 63, 70));
             ctx.set_visuals(visuals);
         },
         move |ctx, setter, _| {
